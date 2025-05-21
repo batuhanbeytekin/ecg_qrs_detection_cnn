@@ -31,83 +31,6 @@ MITBIH_RECORDS = ['100', '101', '102']
 DATA_EXTENSIONS = ['.atr', '.dat', '.hea']
 MITBIH_URL = "https://physionet.org/files/mitdb/1.0.0/"
 
-def train_with_hyperparameter_search():
-    os.makedirs(SAVED_MODEL_DIR, exist_ok=True)
-    os.makedirs('results', exist_ok=True)
-    train_data = ECGDataset(os.path.join(PROCESSED_DATA_PATH, 'X_train.npy'), os.path.join(PROCESSED_DATA_PATH, 'y_train.npy'))
-    test_data = ECGDataset(os.path.join(PROCESSED_DATA_PATH, 'X_test.npy'), os.path.join(PROCESSED_DATA_PATH, 'y_test.npy'))
-
-    best_accuracy = 0
-    best_model = None
-    best_config = None
-
-    configs = [
-        {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 4, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-        {"filters": 4, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 4, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 6, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 4, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-        {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 6, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-        {"filters": 8, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 8, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-        {"filters": 8, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-        {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-        {"filters": 8, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-    ]
-
-    with open(CSV_LOG_FILE, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(["Filters", "Kernel Size", "Pool Size", "Dense Units", "Batch Size", "Epochs", "Optimizer", "Test Loss", "Test Accuracy"])
-
-        for config in configs:
-            print(f"Training config: {config}")
-            model = ECGCNN(config["filters"], config["kernel_size"], config["pool_size"], config["dense_units"]).to(COMPUTE_DEVICE)
-            train_loader = DataLoader(train_data, batch_size=config["batch_size"], shuffle=True)
-            test_loader = DataLoader(test_data, batch_size=config["batch_size"])
-            optimizer = optim.Adam(model.parameters(), lr=0.001) if config["optimizer"] == "adam" else optim.SGD(model.parameters(), lr=0.01)
-            criterion = nn.CrossEntropyLoss()
-
-            for _ in range(config["epochs"]):
-                model.train()
-                for inputs, labels in train_loader:
-                    inputs, labels = inputs.to(COMPUTE_DEVICE), labels.to(COMPUTE_DEVICE)
-                    optimizer.zero_grad()
-                    loss = criterion(model(inputs), labels)
-                    loss.backward()
-                    optimizer.step()
-
-            model.eval()
-            all_labels, all_preds, losses = [], [], []
-            with torch.no_grad():
-                for inputs, labels in test_loader:
-                    inputs, labels = inputs.to(COMPUTE_DEVICE), labels.to(COMPUTE_DEVICE)
-                    outputs = model(inputs)
-                    loss_value = criterion(outputs, labels).item()
-                    preds = torch.argmax(outputs, dim=1)
-                    all_labels.extend(labels.cpu().numpy())
-                    all_preds.extend(preds.cpu().numpy())
-                    losses.append(loss_value)
-
-            acc = accuracy_score(all_labels, all_preds)
-            avg_loss = np.mean(losses)
-            writer.writerow([config["filters"], config["kernel_size"], str(config["pool_size"]), config["dense_units"],
-                             config["batch_size"], config["epochs"], config["optimizer"], round(avg_loss, 6), round(acc, 6)])
-
-            if acc > best_accuracy:
-                best_accuracy = acc
-                best_model = model
-                best_config = config
-
-    if best_model is not None:
-        best_model_path = os.path.join(SAVED_MODEL_DIR, 'best_model.pth')
-        torch.save(best_model.state_dict(), best_model_path)
-        print(f"Best model saved to {best_model_path} with config: {best_config} and accuracy: {best_accuracy}")
-
-    os.makedirs(SAVED_MODEL_DIR, exist_ok=True)
-    os.makedirs('results', exist_ok=True)
-
-
 def fetch_mitbih_dataset():
     os.makedirs(RAW_DATA_PATH, exist_ok=True)
     for record in MITBIH_RECORDS:
@@ -143,6 +66,9 @@ def segment_qrs_and_background():
                 np.save(os.path.join(PROCESSED_SEGMENT_NOTQRS, f"{record}_notqrs_{counter}.npy"), signal_data[t:t + window_size])
                 counter += 1
 
+
+
+import concurrent.futures
 
 def convert_segments_to_wavelet_imgs(wavelet_type='db6', level=4):
     os.makedirs(PROCESSED_SEGMENT_QRS, exist_ok=True)
@@ -262,6 +188,79 @@ class ECGCNN(nn.Module):
         return self.fc2(x)
 
 
+def train_with_hyperparameter_search():
+    os.makedirs(SAVED_MODEL_DIR, exist_ok=True)
+    os.makedirs('results', exist_ok=True)
+    train_data = ECGDataset(os.path.join(PROCESSED_DATA_PATH, 'X_train.npy'), os.path.join(PROCESSED_DATA_PATH, 'y_train.npy'))
+    test_data = ECGDataset(os.path.join(PROCESSED_DATA_PATH, 'X_test.npy'), os.path.join(PROCESSED_DATA_PATH, 'y_test.npy'))
+
+    best_accuracy = 0
+    best_model = None
+    best_config = None
+
+    configs = [
+        {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 4, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+        {"filters": 4, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 4, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 6, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 4, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+        {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 6, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+        {"filters": 8, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 6, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 8, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+        {"filters": 8, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+        {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
+        {"filters": 8, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 8, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
+    ]
+
+    with open(CSV_LOG_FILE, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Filters", "Kernel Size", "Pool Size", "Dense Units", "Batch Size", "Epochs", "Optimizer", "Test Loss", "Test Accuracy"])
+
+        for config in configs:
+            print(f"Training config: {config}")
+            model = ECGCNN(config["filters"], config["kernel_size"], config["pool_size"], config["dense_units"]).to(COMPUTE_DEVICE)
+            train_loader = DataLoader(train_data, batch_size=config["batch_size"], shuffle=True)
+            test_loader = DataLoader(test_data, batch_size=config["batch_size"])
+            optimizer = optim.Adam(model.parameters(), lr=0.001) if config["optimizer"] == "adam" else optim.SGD(model.parameters(), lr=0.01)
+            criterion = nn.CrossEntropyLoss()
+
+            for _ in range(config["epochs"]):
+                model.train()
+                for inputs, labels in train_loader:
+                    inputs, labels = inputs.to(COMPUTE_DEVICE), labels.to(COMPUTE_DEVICE)
+                    optimizer.zero_grad()
+                    loss = criterion(model(inputs), labels)
+                    loss.backward()
+                    optimizer.step()
+
+            model.eval()
+            all_labels, all_preds, losses = [], [], []
+            with torch.no_grad():
+                for inputs, labels in test_loader:
+                    inputs, labels = inputs.to(COMPUTE_DEVICE), labels.to(COMPUTE_DEVICE)
+                    outputs = model(inputs)
+                    loss_value = criterion(outputs, labels).item()
+                    preds = torch.argmax(outputs, dim=1)
+                    all_labels.extend(labels.cpu().numpy())
+                    all_preds.extend(preds.cpu().numpy())
+                    losses.append(loss_value)
+
+            acc = accuracy_score(all_labels, all_preds)
+            avg_loss = np.mean(losses)
+            writer.writerow([config["filters"], config["kernel_size"], str(config["pool_size"]), config["dense_units"],
+                             config["batch_size"], config["epochs"], config["optimizer"], round(avg_loss, 6), round(acc, 6)])
+
+            if acc > best_accuracy:
+                best_accuracy = acc
+                best_model = model
+                best_config = config
+
+    if best_model is not None:
+        best_model_path = os.path.join(SAVED_MODEL_DIR, 'best_model.pth')
+        torch.save(best_model.state_dict(), best_model_path)
+        print(f"Best model saved to {best_model_path} with config: {best_config} and accuracy: {best_accuracy}")
+
 def convert_segments_to_wavelet_imgs(wavelet_type='db6', level=4):
     os.makedirs(PROCESSED_SEGMENT_QRS, exist_ok=True)
     os.makedirs(PROCESSED_SEGMENT_NOTQRS, exist_ok=True)
@@ -340,6 +339,11 @@ wavelet_configs = [
     {'wavelet_type': 'coif1', 'level': 3}
 ]
 
+for config in wavelet_configs:
+    print(f"Generating images with wavelet {config['wavelet_type']} at level {config['level']}")
+    convert_segments_to_wavelet_imgs(wavelet_type=config['wavelet_type'], level=config['level'])
+
+
 def is_dataset_ready():
     expected_files = [
         os.path.join(PROCESSED_DATA_PATH, 'X_train.npy'),
@@ -410,33 +414,9 @@ if __name__ == "__main__":
     run_full_training_pipeline()
 
 
-    X_test, y_test = [], []
-    for label, folder in [(1, 'images/testDataset/QRS'), (0, 'images/testDataset/notQRS')]:
-        for img_file in os.listdir(folder):
-            img_path = os.path.join(folder, img_file)
-            img = Image.open(img_path).convert('L').resize((64, 64))
-            X_test.append(np.array(img) / 255.0)
-            y_test.append(label)
-
-    X_test = np.expand_dims(np.array(X_test), axis=1)
-    y_test = np.array(y_test)
-
-    inputs = torch.tensor(X_test, dtype=torch.float32).to(COMPUTE_DEVICE)
-    labels = torch.tensor(y_test, dtype=torch.long).to(COMPUTE_DEVICE)
-
-    with torch.no_grad():
-        outputs = model(inputs)
-        preds = torch.argmax(outputs, dim=1)
-
-    acc = accuracy_score(labels.cpu().numpy(), preds.cpu().numpy())
-    print(f"Test Accuracy on images/testDataset with wavelet {wavelet_type}: {acc:.4f}")
-
+    
 
 # Evaluate best model if it exists
-best_model_path = os.path.join(SAVED_MODEL_DIR, 'best_model.pth')
-if os.path.exists(best_model_path):
-    evaluate_model_on_test_dataset(best_model_path)
-
 def evaluate_model_on_test_dataset(model_path, filters, kernel_size, pool_size, dense_units, wavelet_type='db6'):
     print(f"Evaluating best model with config: filters={filters}, kernel_size={kernel_size}, pool_size={pool_size}, dense_units={dense_units}")
     model = ECGCNN(filters=filters, kernel_size=kernel_size, pool_size=pool_size, dense_units=dense_units)
@@ -444,31 +424,10 @@ def evaluate_model_on_test_dataset(model_path, filters, kernel_size, pool_size, 
     model.to(COMPUTE_DEVICE)
     model.eval()
 
-    X_test, y_test = [], []
-    for label, folder in [(1, 'images/testDataset/QRS'), (0, 'images/testDataset/notQRS')]:
-        for img_file in os.listdir(folder):
-            img_path = os.path.join(folder, img_file)
-            img = Image.open(img_path).convert('L').resize((64, 64))
-            X_test.append(np.array(img) / 255.0)
-            y_test.append(label)
-
-    if len(X_test) == 0:
-        print("Test set is empty.")
-        return
-
-    X_test = np.expand_dims(np.array(X_test), axis=1)
-    y_test = np.array(y_test)
-
-    inputs = torch.tensor(X_test, dtype=torch.float32).to(COMPUTE_DEVICE)
-    labels = torch.tensor(y_test, dtype=torch.long).to(COMPUTE_DEVICE)
-
-    with torch.no_grad():
-        outputs = model(inputs)
-        preds = torch.argmax(outputs, dim=1)
-
-    acc = accuracy_score(labels.cpu().numpy(), preds.cpu().numpy())
-    print(f"Test Accuracy on images/testDataset with wavelet {wavelet_type}: {acc:.4f}")
-
+best_model_path = os.path.join(SAVED_MODEL_DIR, 'best_model.pth')
+if os.path.exists(best_model_path):
+    evaluate_model_on_test_dataset(best_model_path)
+    
 
 # Evaluate best model if it exists
 best_model_path = os.path.join(SAVED_MODEL_DIR, 'best_model.pth')
