@@ -121,7 +121,7 @@ def prepare_numpy_dataset(img_qrs_path, img_notqrs_path, target_shape=(64, 64)):
     np.save(os.path.join(PROCESSED_DATA_PATH, 'y_test.npy'), y_test)
 
 class ECGCNN(nn.Module):
-    def __init__(self, filters, kernel_size, pool_size, dense_units):
+    def __init__(self, filters, kernel_size, pool_size, dense_units, batch_size, epochs, optimizer): 
         super(ECGCNN, self).__init__()
         self.conv1 = nn.Conv2d(1, filters, kernel_size=kernel_size, padding=1)
         self.pool = nn.MaxPool2d(pool_size)
@@ -142,18 +142,26 @@ class ECGCNN(nn.Module):
 def train_model_and_save_best(configs, wavelet='db6'):
     train_dataset = ECGDataset('data/processed/X_train.npy', 'data/processed/y_train.npy')
     test_dataset = ECGDataset('data/processed/X_test.npy', 'data/processed/y_test.npy')
+    
     best_acc = 0
     best_model = None
     best_conf = None
     results = []
+
     ensure_dirs('results', 'models')
-    for config in configs:
+
+    for i, config in enumerate(configs):
+        print(f"\nTraining with config {i+1}: {config}")
         model = ECGCNN(**config).to(COMPUTE_DEVICE)
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+        optimizer_cls = optim.Adam if config['optimizer'] == 'adam' else optim.SGD
+        optimizer = optimizer_cls(model.parameters(), lr=0.001)
         criterion = nn.CrossEntropyLoss()
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
         test_loader = DataLoader(test_dataset, batch_size=32)
-        for epoch in range(2):
+
+        for epoch in range(config['epochs']):
             model.train()
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(COMPUTE_DEVICE), labels.to(COMPUTE_DEVICE)
@@ -161,6 +169,7 @@ def train_model_and_save_best(configs, wavelet='db6'):
                 loss = criterion(model(inputs), labels)
                 loss.backward()
                 optimizer.step()
+
         model.eval()
         all_preds, all_labels = [], []
         with torch.no_grad():
@@ -170,19 +179,36 @@ def train_model_and_save_best(configs, wavelet='db6'):
                 preds = torch.argmax(outputs, dim=1)
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
+
         acc = accuracy_score(all_labels, all_preds)
-        results.append({**config, 'accuracy': acc})
+        results.append({**config, 'wavelet': wavelet, 'accuracy': acc})
+
+        print(f"Config {i+1} Accuracy: {acc:.4f}")
+
         if acc > best_acc:
             best_acc = acc
             best_model = model
             best_conf = config
+
+    # Save only the best model
     if best_model:
         model_path = os.path.join(SAVED_MODEL_DIR, f'best_model_{wavelet}.pth')
         torch.save(best_model.state_dict(), model_path)
-        pd.DataFrame(results).to_excel(CSV_LOG_FILE, index=False)
-        print(f"Best model saved. Accuracy: {best_acc:.4f}, Config: {best_conf}")
 
-def evaluate_model_on_test_images(model_path, config, test_qrs_path, test_notqrs_path, wavelet='db6'):
+        # Load existing log if it exists
+        if os.path.exists(CSV_LOG_FILE):
+            existing_df = pd.read_excel(CSV_LOG_FILE)
+            full_df = pd.concat([existing_df, pd.DataFrame(results)], ignore_index=True)
+        else:
+            full_df = pd.DataFrame(results)
+
+        full_df.to_excel(CSV_LOG_FILE, index=False)
+
+        print(f"\nBest model saved to {model_path}")
+        print(f"Best Config: {best_conf}, Accuracy: {best_acc:.4f}")
+
+
+def evaluate_model_on_test_images(model_path, config, test_qrs_path, test_notqrs_path, wavelet):
     model = ECGCNN(**config).to(COMPUTE_DEVICE)
     model.load_state_dict(torch.load(model_path))
     model.eval()
@@ -247,15 +273,8 @@ def main():
         configs = [
             {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
             {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-            # {"filters": 4, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-            # {"filters": 4, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-            # {"filters": 4, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-            # {"filters": 4, "kernel_size": 4, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-            # {"filters": 6, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-            # {"filters": 6, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-            # {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"},
-            # {"filters": 6, "kernel_size": 3, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "sgd"},
-            # {"filters": 8, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 32, "epochs": 2, "optimizer": "adam"}
+            {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 16, "epochs": 4, "optimizer": "adam"},
+            {"filters": 4, "kernel_size": 2, "pool_size": (2, 2), "dense_units": 2, "batch_size": 16, "epochs": 4, "optimizer": "sgd"},
         ]
         train_model_and_save_best(configs, wavelet=wavelet)
         print(f"Evaluating best model for wavelet: {wavelet}")
